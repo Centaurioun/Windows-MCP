@@ -58,22 +58,40 @@ def cancel_active_flash(timeout: float = 0.25) -> None:
     ov.closed_event.wait(timeout=timeout)
 
 
-def show_capture_flash(
-    rects: list[tuple[int, int, int, int]],
-    *,
-    full_screen: bool,
-) -> None:
-    """Show a fade-in/out orange-red glow around each rect.
+def show_capture_flash(capture_rect: "object | None" = None) -> None:
+    """Show a fade-in/out orange-red glow for a screenshot capture.
 
-    ``rects`` are ``(left, top, right, bottom)`` tuples in virtual-screen
-    coordinates. ``full_screen=True`` draws an inner halo radiating inward
-    from each monitor edge; ``full_screen=False`` draws an outer halo
-    around the captured region. Returns immediately; rendering happens on
-    a daemon thread.
+    Pass the same ``capture_rect`` (``uia.Rect`` with ``left/top/right/
+    bottom``) used for the screenshot — or ``None`` for a full-desktop
+    capture, in which case every monitor gets an inner-edge halo. Returns
+    immediately; rendering happens on a daemon thread, and any previously
+    active overlay is cancelled atomically so a follow-up capture never
+    leaks a stale overlay.
     """
-    if _flash_disabled() or not rects:
+    if _flash_disabled():
         return
-    rects = [tuple(r) for r in rects]
+    try:
+        if capture_rect is not None:
+            rects: list[tuple[int, int, int, int]] = [
+                (
+                    int(capture_rect.left),
+                    int(capture_rect.top),
+                    int(capture_rect.right),
+                    int(capture_rect.bottom),
+                )
+            ]
+            full_screen = False
+        else:
+            import windows_mcp.uia as uia
+
+            monitor_rects = uia.GetMonitorsRect()
+            rects = [(m.left, m.top, m.right, m.bottom) for m in monitor_rects]
+            full_screen = True
+    except Exception:
+        logger.debug("could not resolve flash overlay rects", exc_info=True)
+        return
+    if not rects:
+        return
     overlay = _Overlay()
     overlay.thread = threading.Thread(
         target=_run_overlay,
@@ -81,9 +99,16 @@ def show_capture_flash(
         name="windows-mcp-flash",
         daemon=True,
     )
+    # Atomic swap: save the previous overlay under the lock, install the new
+    # one, then signal the prior overlay outside the lock so it can tear down
+    # without blocking new callers. Without this, an overwrite would orphan
+    # the prior overlay — cancel_active_flash() could no longer reach it.
     with _lock:
         global _active_overlay
+        prev = _active_overlay
         _active_overlay = overlay
+    if prev is not None:
+        prev.stop_event.set()
     overlay.thread.start()
 
 

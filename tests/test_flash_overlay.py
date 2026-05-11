@@ -43,22 +43,35 @@ class TestFlashDisabled:
         assert flash_overlay._flash_disabled() is False
 
 
+class _FakeRect:
+    """Stand-in for ``uia.Rect`` with the four corner attributes."""
+
+    def __init__(self, left, top, right, bottom):
+        self.left = left
+        self.top = top
+        self.right = right
+        self.bottom = bottom
+
+
 class TestShowCaptureFlash:
     def test_disabled_env_var_skips_thread(self, monkeypatch):
         monkeypatch.setenv("WINDOWS_MCP_DISABLE_FLASH", "1")
         with patch.object(threading, "Thread") as fake_thread:
-            flash_overlay.show_capture_flash([(0, 0, 100, 100)], full_screen=False)
+            flash_overlay.show_capture_flash(_FakeRect(0, 0, 100, 100))
         fake_thread.assert_not_called()
         assert flash_overlay._active_overlay is None
 
-    def test_empty_rects_skips_thread(self, monkeypatch):
+    def test_empty_monitor_rects_skips_thread(self, monkeypatch):
+        """Full-screen path with zero monitors must not start a thread."""
         monkeypatch.delenv("WINDOWS_MCP_DISABLE_FLASH", raising=False)
+        fake_uia = type("fake_uia", (), {"GetMonitorsRect": staticmethod(lambda: [])})
+        monkeypatch.setitem(sys.modules, "windows_mcp.uia", fake_uia)
         with patch.object(threading, "Thread") as fake_thread:
-            flash_overlay.show_capture_flash([], full_screen=False)
+            flash_overlay.show_capture_flash(None)
         fake_thread.assert_not_called()
         assert flash_overlay._active_overlay is None
 
-    def test_registers_overlay_and_starts_daemon_thread(self, monkeypatch):
+    def test_region_capture_passes_single_rect(self, monkeypatch):
         monkeypatch.delenv("WINDOWS_MCP_DISABLE_FLASH", raising=False)
 
         captured = {}
@@ -75,17 +88,72 @@ class TestShowCaptureFlash:
 
         monkeypatch.setattr(flash_overlay.threading, "Thread", _StubThread)
 
-        flash_overlay.show_capture_flash([(10, 20, 110, 120)], full_screen=True)
+        flash_overlay.show_capture_flash(_FakeRect(10, 20, 110, 120))
 
         assert captured["started"] is True
         assert captured["daemon"] is True
         assert captured["name"] == "windows-mcp-flash"
         assert flash_overlay._active_overlay is not None
-        # rects passed through; full_screen flag forwarded
         rects_arg, full_screen_arg, overlay_arg = captured["args"]
         assert rects_arg == [(10, 20, 110, 120)]
-        assert full_screen_arg is True
+        assert full_screen_arg is False
         assert overlay_arg is flash_overlay._active_overlay
+
+    def test_full_screen_capture_enumerates_monitors(self, monkeypatch):
+        """When capture_rect is None the helper must read uia.GetMonitorsRect."""
+        monkeypatch.delenv("WINDOWS_MCP_DISABLE_FLASH", raising=False)
+        fake_uia = type(
+            "fake_uia",
+            (),
+            {
+                "GetMonitorsRect": staticmethod(
+                    lambda: [_FakeRect(0, 0, 1920, 1080), _FakeRect(1920, 0, 3840, 1080)]
+                )
+            },
+        )
+        monkeypatch.setitem(sys.modules, "windows_mcp.uia", fake_uia)
+
+        captured = {}
+
+        class _StubThread:
+            def __init__(self, target, args, name, daemon):
+                captured["args"] = args
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(flash_overlay.threading, "Thread", _StubThread)
+
+        flash_overlay.show_capture_flash(None)
+
+        rects_arg, full_screen_arg, _ = captured["args"]
+        assert rects_arg == [(0, 0, 1920, 1080), (1920, 0, 3840, 1080)]
+        assert full_screen_arg is True
+
+    def test_overlapping_calls_cancel_prior_overlay(self, monkeypatch):
+        """Second call must signal the prior overlay's stop_event so it can be torn down."""
+        monkeypatch.delenv("WINDOWS_MCP_DISABLE_FLASH", raising=False)
+
+        class _StubThread:
+            def __init__(self, *a, **kw):
+                pass
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(flash_overlay.threading, "Thread", _StubThread)
+
+        flash_overlay.show_capture_flash(_FakeRect(0, 0, 100, 100))
+        first = flash_overlay._active_overlay
+        assert first is not None
+        assert not first.stop_event.is_set()
+
+        flash_overlay.show_capture_flash(_FakeRect(0, 0, 100, 100))
+        second = flash_overlay._active_overlay
+        assert second is not None
+        assert second is not first
+        # Critical: the prior overlay must be signalled so cancel_active_flash semantics survive
+        assert first.stop_event.is_set()
 
 
 class TestCancelActiveFlash:

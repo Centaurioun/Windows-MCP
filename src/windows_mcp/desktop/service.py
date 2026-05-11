@@ -1056,24 +1056,7 @@ class Desktop:
         flash_overlay.cancel_active_flash()
         image, used_backend = screenshot_capture.capture(capture_rect)
         self._last_screenshot_backend = used_backend
-        try:
-            if capture_rect is not None:
-                rects = [
-                    (
-                        capture_rect.left,
-                        capture_rect.top,
-                        capture_rect.right,
-                        capture_rect.bottom,
-                    )
-                ]
-                full_screen = False
-            else:
-                monitor_rects = uia.GetMonitorsRect()
-                rects = [(m.left, m.top, m.right, m.bottom) for m in monitor_rects]
-                full_screen = True
-            flash_overlay.show_capture_flash(rects, full_screen=full_screen)
-        except Exception:
-            logger.debug("could not start screenshot flash overlay", exc_info=True)
+        flash_overlay.show_capture_flash(capture_rect)
         return image
 
     def get_annotated_screenshot(
