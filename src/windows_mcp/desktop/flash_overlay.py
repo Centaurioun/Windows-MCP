@@ -247,13 +247,17 @@ def _render_glow_rgba(
     width: int,
     height: int,
     rect_list: list[tuple[int, int, int, int]],
+    *,
+    outward: bool = True,
 ) -> "object":
     """Return a PIL RGBA image with a soft halo ring around each rect.
 
     Each rect is in window-local coordinates. A sharp solid border is drawn
-    on the rect edge, then the layer is gaussian-blurred to spread the
-    glow, and the sharp ring is composited back on top so the inner edge
-    stays crisp.
+    just outside the rect edge (``outward=True``) so the captured area stays
+    clean and the halo reads as a surround, then the layer is
+    gaussian-blurred to spread the glow, and the sharp ring is composited
+    back on top so the inner edge stays crisp. ``outward=False`` nests the
+    ring inward — used for the full-screen inner halo.
     """
     from PIL import Image, ImageDraw, ImageFilter
 
@@ -262,11 +266,18 @@ def _render_glow_rgba(
     color = (*_FLASH_RGB, 255)
     for x1, y1, x2, y2 in rect_list:
         for i in range(_GLOW_BORDER_THICKNESS):
-            draw.rectangle(
-                [x1 + i, y1 + i, x2 - i - 1, y2 - i - 1],
-                outline=color,
-                width=1,
-            )
+            if outward:
+                draw.rectangle(
+                    [x1 - i - 1, y1 - i - 1, x2 + i, y2 + i],
+                    outline=color,
+                    width=1,
+                )
+            else:
+                draw.rectangle(
+                    [x1 + i, y1 + i, x2 - i - 1, y2 - i - 1],
+                    outline=color,
+                    width=1,
+                )
     blurred = sharp.filter(ImageFilter.GaussianBlur(radius=_GLOW_BLUR_RADIUS))
     return Image.alpha_composite(blurred, sharp)
 
@@ -489,7 +500,7 @@ def _run_overlay(
             _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE | _SWP_SHOWWINDOW,
         )
 
-        glow_rgba = _render_glow_rgba(width, height, local_rects)
+        glow_rgba = _render_glow_rgba(width, height, local_rects, outward=not full_screen)
 
         logger.info(
             "screenshot flash overlay started: %dx%d layered window at (%d,%d) for %d rect(s)",
